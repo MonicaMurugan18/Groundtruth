@@ -1,0 +1,17 @@
+# ---------------------------------------------------------------------
+# Groundtruth LiveKit voice agent
+#
+# Kept in a separate virtualenv from backend/: livekit-agents constrains
+# yarl and other transitive deps in ways that conflict with the ragas and
+# guardrails stack in the API service.
+#
+# Requires Python 3.11 (livekit-agents supports >=3.10,<3.15).
+# ---------------------------------------------------------------------
+
+livekit-agents[silero,turn-detector]~=1.5
+python-dotenv==1.2.1
+httpx==0.28.1
+
+# yarl 1.24.1 shipped a cp310-only wheel with no sdist, so it cannot install
+# on Python 3.11+. Matches the constraint in the official LiveKit starter.
+yarl<1.24

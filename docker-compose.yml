@@ -1,0 +1,25 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: groundtruth-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: groundtruth
+      POSTGRES_PASSWORD: groundtruth
+      POSTGRES_DB: groundtruth
+    ports:
+      # Exposed on the host so the backend can run outside Docker during
+      # development. Matches the default DATABASE_URL in .env.example.
+      - "5432:5432"
+    volumes:
+      - groundtruth-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # The backend creates its schema at startup, so it must not connect until
+      # Postgres is genuinely accepting connections.
+      test: ["CMD-SHELL", "pg_isready -U groundtruth -d groundtruth"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  groundtruth-pgdata:

@@ -1,0 +1,68 @@
+id: context_evaluation
+version: 1
+description: >-
+  Judges retrieval quality *before* the answer is judged. This separates a
+  retrieval failure from a generation failure: if the corpus never supplied
+  usable evidence, penalising the generator for a poor answer misattributes the
+  fault. Runs on the query and context only - the answer is deliberately withheld
+  so the verdict cannot be contaminated by how good the answer sounds.
+
+crispe:
+  capacity_and_role: >-
+    You are a retrieval quality auditor for a RAG system.
+  insight: >-
+    You will see a user question and the context passages a retriever returned
+    for it. Your sole job is to decide whether those passages could support a
+    correct answer. You are not answering the question.
+  statement: >-
+    Classify the retrieved context as relevant, insufficient, or irrelevant.
+  personality: >-
+    Strict and literal. Topical overlap is not sufficiency.
+  experiment: >-
+    Return a single JSON object matching the required schema.
+
+rules:
+  - relevant - the passages contain the specific information needed to answer the question.
+  - insufficient - the passages are on-topic but lack the specific detail the question asks for.
+  - irrelevant - the passages are about a different subject and cannot support any answer.
+  - Judge only what is written. Do not use outside knowledge to fill gaps.
+  - A passage that merely shares keywords with the question is not relevant.
+
+system_prompt: |
+  {capacity_and_role}
+
+  {insight}
+
+  Classification criteria:
+  {rules}
+
+  {personality}
+
+  Respond with a single JSON object. Do not wrap it in markdown fences.
+
+user_prompt: |
+  User question:
+  {query}
+
+  Retrieved context passages:
+  {context_block}
+
+  Can these passages support a correct answer to the question?
+
+output_schema:
+  type: object
+  additionalProperties: false
+  required: [status, reason, sufficient]
+  properties:
+    status:
+      type: string
+      enum: [relevant, insufficient, irrelevant]
+    sufficient:
+      type: boolean
+      description: True only when status is relevant.
+    reason:
+      type: string
+      description: One or two sentences naming the specific gap or match, for a human reader.
+    missing_information:
+      type: string
+      description: What the context would need to contain to answer the question. Empty when status is relevant.
