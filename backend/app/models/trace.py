@@ -66,6 +66,19 @@ class EvaluationTrace(Base):
         String(16), default="none", nullable=False
     )
 
+    # --- Moss ---
+    # Scalar status of the PRIMARY retrieval call, indexed so the dashboard can
+    # filter/aggregate on "did Moss serve this?" without unpacking JSON.
+    moss_status: Mapped[str] = mapped_column(
+        String(20), default="skipped", nullable=False, index=True
+    )
+    # Every Moss call made for this interaction, in order, each with its own
+    # status, timing and verbatim error. Kept as JSON rather than more columns
+    # because the number of Moss stages is a pipeline detail, not a schema one.
+    moss_stages: Mapped[list] = mapped_column(JSON, default=list)
+    # Corroborating-evidence summary from the second Moss stage.
+    moss_evidence: Mapped[dict] = mapped_column(JSON, default=dict)
+
     # --- RAGAS scores (NULL == not computed) ---
     faithfulness_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     faithfulness_status: Mapped[str] = mapped_column(String(20), default="unavailable")

@@ -66,9 +66,14 @@ async def capabilities(
             name="llm",
             configured=settings.llm_configured,
             detail=(
-                f"OpenAI model {settings.llm_model}"
+                f"{settings.active_provider} model {settings.active_llm_model} "
+                f"(judge: {settings.active_eval_model})"
                 if settings.llm_configured
-                else "OPENAI_API_KEY is not set. Generation and RAGAS scoring are unavailable."
+                else (
+                    f"{settings.llm_key_variable} is not set for LLM_PROVIDER="
+                    f"{settings.active_provider}. Generation and RAGAS scoring "
+                    "are unavailable."
+                )
             ),
         )
     )

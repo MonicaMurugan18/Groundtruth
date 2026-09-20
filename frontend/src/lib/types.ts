@@ -60,6 +60,43 @@ export interface FactualVerification {
   reason: string;
 }
 
+export type MossStatus =
+  | 'success'
+  | 'empty'
+  | 'failed'
+  | 'not_configured'
+  | 'skipped';
+
+/** One recorded Moss call. Every field is measured or returned by Moss. */
+export interface MossStageInfo {
+  stage: 'primary_retrieval' | 'evidence_verification' | string;
+  status: MossStatus;
+  query: string | null;
+  index: string | null;
+  result_count: number;
+  /** Moss's own reported search time. Null when Moss did not answer. */
+  engine_ms: number | null;
+  /** Our wall-clock measurement, including transport. */
+  wall_ms: number | null;
+  top_score: number | null;
+  model_id: string | null;
+  /** Verbatim Moss error. Never paraphrased. */
+  error: string | null;
+}
+
+/**
+ * Corroborating evidence Moss found for the generated answer.
+ * A support signal, not a truth claim.
+ */
+export interface MossEvidence {
+  status: MossStatus;
+  match_count: number;
+  top_score: number | null;
+  engine_ms: number | null;
+  snippets: string[];
+  reason: string;
+}
+
 export interface LatencyBreakdown {
   retrieval_ms: number | null;
   llm_ms: number | null;
@@ -94,6 +131,8 @@ export interface EvaluationResponse {
   supported: boolean | null;
 
   retrieval_backend: RetrievalBackend;
+  moss_stages: MossStageInfo[];
+  moss_evidence: MossEvidence | null;
   latency: LatencyBreakdown;
   warnings: string[];
 }

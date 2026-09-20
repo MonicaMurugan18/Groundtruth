@@ -21,8 +21,9 @@ from dataclasses import dataclass, field
 
 from app.config.settings import Settings, get_settings
 from app.integrations.moss.client import (
-    MossNotConfigured,
-    MossUnavailable,
+    MossStage,
+    MossStageRecord,
+    MossStatus,
     get_moss_retriever,
 )
 from app.retrieval.faiss_store import get_faiss_store
@@ -40,6 +41,9 @@ class RetrievalOutcome:
     warnings: list[str] = field(default_factory=list)
     # Moss's self-reported search duration, when Moss served the request.
     engine_ms: float | None = None
+    # Auditable record of the Moss call behind this retrieval, present whenever
+    # Moss was reached for (or deliberately skipped on) this query.
+    moss_record: MossStageRecord | None = None
 
     @property
     def texts(self) -> list[str]:
@@ -64,39 +68,84 @@ async def retrieve(
 
     prefer_moss = settings.retrieval_backend.lower() == "moss"
 
+    # Honour the *passed* settings, not just the process-wide singleton. The
+    # Moss adapter is a module-level singleton built from the environment, so
+    # without this check a caller that supplies settings with no Moss
+    # credentials would still be served by Moss.
+    if prefer_moss and not settings.moss_configured:
+        prefer_moss = False
+        warnings.append(
+            "Moss is not configured (MOSS_PROJECT_ID / MOSS_PROJECT_KEY are unset). "
+            "Retrieval was served by FAISS."
+        )
+
+    moss_record: MossStageRecord | None = None
+
     if prefer_moss:
-        try:
-            outcome = await _retrieve_moss(query, k, trace)
-            if outcome.chunks:
-                return outcome
+        outcome, moss_record = await _retrieve_moss(query, k, trace)
+        if outcome is not None and outcome.chunks:
+            return outcome
+        if moss_record.status is MossStatus.EMPTY:
             warnings.append(
                 "Moss returned no matches; falling back to FAISS for this query."
             )
-        except MossNotConfigured:
+        elif moss_record.status is MossStatus.NOT_CONFIGURED:
             warnings.append(
                 "Moss is not configured (MOSS_PROJECT_ID / MOSS_PROJECT_KEY are unset). "
                 "Retrieval was served by FAISS."
             )
-        except MossUnavailable as exc:
-            logger.warning("Moss retrieval failed, falling back to FAISS: %s", exc)
-            warnings.append(f"Moss retrieval failed, so FAISS served this query: {exc}")
+        elif moss_record.status is MossStatus.FAILED:
+            logger.warning(
+                "Moss retrieval failed, falling back to FAISS: %s", moss_record.error
+            )
+            warnings.append(
+                f"Moss retrieval failed, so FAISS served this query: {moss_record.error}"
+            )
+    else:
+        # Distinguish the two reasons Moss was not called. "Not configured" is
+        # a missing credential the operator can fix; "skipped" is a deliberate
+        # choice of backend. Collapsing them into one status would make the
+        # dashboard say "skipped" for what is really a setup problem.
+        misconfigured = settings.retrieval_backend.lower() == "moss"
+        moss_record = MossStageRecord(
+            stage=MossStage.PRIMARY_RETRIEVAL,
+            status=MossStatus.NOT_CONFIGURED if misconfigured else MossStatus.SKIPPED,
+            query=query,
+            error=(
+                "MOSS_PROJECT_ID / MOSS_PROJECT_KEY are not set."
+                if misconfigured
+                else f"RETRIEVAL_BACKEND is {settings.retrieval_backend!r}, not 'moss'."
+            ),
+        )
 
     outcome = _retrieve_faiss(query, k, trace)
     outcome.warnings = warnings + outcome.warnings
+    outcome.moss_record = moss_record
     return outcome
 
 
 async def _retrieve_moss(
     query: str, k: int, trace: LatencyTrace | None
-) -> RetrievalOutcome:
-    """Search Moss and normalise its hits."""
+) -> tuple[RetrievalOutcome | None, MossStageRecord]:
+    """Search Moss and normalise its hits.
+
+    Returns ``(None, record)`` when Moss could not serve the query, so the
+    caller can fall back while still recording exactly what Moss did.
+    """
     retriever = get_moss_retriever()
 
     if trace is not None:
         with trace.span(RETRIEVAL):
-            result = await retriever.search(query, top_k=k)
+            result, record = await retriever.search_recorded(
+                query, stage=MossStage.PRIMARY_RETRIEVAL, top_k=k
+            )
     else:
-        result = await retriever.search(query, top_k=k)
+        result, record = await retriever.search_recorded(
+            query, stage=MossStage.PRIMARY_RETRIEVAL, top_k=k
+        )
+
+    if result is None or not result.hits:
+        return None, record
 
     texts = [hit.text for hit in result.hits]
     # Comparable cosine similarity, so the number shown next to a Moss chunk
@@ -114,10 +163,14 @@ async def _retrieve_moss(
         for index, hit in enumerate(result.hits)
     ]
 
-    return RetrievalOutcome(
-        chunks=chunks,
-        backend=RetrievalBackend.MOSS,
-        engine_ms=result.time_taken_ms,
+    return (
+        RetrievalOutcome(
+            chunks=chunks,
+            backend=RetrievalBackend.MOSS,
+            engine_ms=result.time_taken_ms,
+            moss_record=record,
+        ),
+        record,
     )
 
 

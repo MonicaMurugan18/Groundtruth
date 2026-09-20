@@ -57,20 +57,34 @@ def _build_judge():
     settings = get_settings()
     if not settings.llm_configured:
         raise RuntimeError(
-            "OPENAI_API_KEY is not set, so RAGAS metrics cannot be computed."
+            f"{settings.llm_key_variable} is not set (LLM_PROVIDER="
+            f"{settings.active_provider!r}), so RAGAS metrics cannot be computed."
         )
 
     from openai import AsyncOpenAI
     from ragas.embeddings.base import embedding_factory
     from ragas.llms import llm_factory
 
-    client_kwargs: dict = {"api_key": settings.openai_api_key}
-    if settings.openai_base_url.strip():
-        client_kwargs["base_url"] = settings.openai_base_url.strip()
+    client_kwargs: dict = {
+        "api_key": settings.llm_api_key,
+        "max_retries": settings.llm_max_retries,
+    }
+    if settings.llm_base_url:
+        client_kwargs["base_url"] = settings.llm_base_url
     client = AsyncOpenAI(**client_kwargs)
 
-    llm = llm_factory(settings.eval_llm_model, client=client)
-    embeddings = embedding_factory("openai", model="text-embedding-3-small", client=client)
+    # provider="openai" is the wire protocol, not the vendor: Groq is
+    # OpenAI-compatible and is reached through the same client via base URL.
+    llm = llm_factory(settings.active_eval_model, provider="openai", client=client)
+
+    # Embeddings run locally on the same Hugging Face model the corpus is
+    # indexed with, for two reasons:
+    #   1. Groq serves no embedding models at all, so routing AnswerRelevancy
+    #      through the chat client returns 404 for text-embedding-3-small.
+    #   2. Measuring answer relevance in the same vector space the retriever
+    #      uses is more consistent than mixing embedding families, and costs
+    #      nothing per evaluation.
+    embeddings = embedding_factory("huggingface", settings.embedding_model)
     return llm, embeddings
 
 

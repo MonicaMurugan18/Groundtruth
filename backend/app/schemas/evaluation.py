@@ -135,6 +135,37 @@ class FactualVerification(BaseModel):
     )
 
 
+class MossEvidence(BaseModel):
+    """Corroborating evidence Moss found for the generated answer.
+
+    This is a *support* signal, not a truth claim. Faithfulness is still scored
+    against the context the model was actually shown; this records, separately,
+    whether the corpus independently contains passages resembling the answer.
+    """
+
+    status: str
+    match_count: int = 0
+    top_score: float | None = None
+    engine_ms: float | None = None
+    snippets: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+
+class MossStageInfo(BaseModel):
+    """One recorded Moss call, exactly as it happened."""
+
+    stage: str
+    status: str
+    query: str | None = None
+    index: str | None = None
+    result_count: int = 0
+    engine_ms: float | None = None
+    wall_ms: float | None = None
+    top_score: float | None = None
+    model_id: str | None = None
+    error: str | None = None
+
+
 class LatencyBreakdown(BaseModel):
     """Per-stage wall-clock timings, in milliseconds."""
 
@@ -182,6 +213,9 @@ class EvaluationResponse(BaseModel):
 
     # Observability
     retrieval_backend: RetrievalBackend
+    # Every Moss call made for this interaction, in order.
+    moss_stages: list[MossStageInfo] = Field(default_factory=list)
+    moss_evidence: MossEvidence | None = None
     latency: LatencyBreakdown
     warnings: list[str] = Field(default_factory=list)
 

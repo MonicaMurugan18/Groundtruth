@@ -26,6 +26,8 @@ LLM = "llm"
 GUARDRAIL = "guardrail"
 EVALUATION = "evaluation"
 CONTEXT_VALIDATION = "context_validation"
+# Second Moss stage: corroborating-evidence lookup on the generated answer.
+MOSS_EVIDENCE = "moss_evidence"
 
 
 @dataclass

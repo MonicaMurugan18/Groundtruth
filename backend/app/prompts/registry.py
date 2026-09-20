@@ -42,10 +42,31 @@ class PromptTemplate:
     output_schema: dict[str, Any]
 
     def render_system(self) -> str:
-        """Fill the system prompt from the CRISPE fields and rules."""
+        """Fill the system prompt from the CRISPE fields and rules.
+
+        The declared JSON schema is appended verbatim. Describing the shape in
+        prose is not enough for every model: asked "does the candidate convey
+        the same facts?", gpt-oss-120b replied ``{"same_facts": false}`` - valid
+        JSON, correct judgement, wrong contract. Showing the schema makes the
+        templates portable across providers instead of relying on one model's
+        ability to infer it.
+        """
         fields = dict(self.crispe)
         fields["rules"] = "\n".join(f"- {rule}" for rule in self.rules)
-        return _safe_format(self.system_prompt, fields, self.id).strip()
+        rendered = _safe_format(self.system_prompt, fields, self.id).strip()
+
+        required = self.output_schema.get("required") or []
+        schema_block = json.dumps(self.output_schema, indent=2)
+        contract = (
+            "Your reply must be a single JSON object matching this exact schema:\n"
+            f"{schema_block}\n"
+        )
+        if required:
+            contract += (
+                "Every one of these keys is REQUIRED and must be present: "
+                f"{', '.join(required)}. Use exactly these key names."
+            )
+        return f"{rendered}\n\n{contract}".strip()
 
     def render_user(self, **kwargs: Any) -> str:
         return _safe_format(self.user_prompt, kwargs, self.id).strip()

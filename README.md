@@ -189,6 +189,22 @@ Dashboard: <http://localhost:3000>
 and, once auth is enabled, the API token the server-side proxy attaches. Nothing
 there is prefixed `NEXT_PUBLIC_`, so nothing reaches the browser.
 
+### 4b. Signing in
+
+With `AUTH_DISABLED=false` (the default in `.env.example`) the dashboard
+requires a login. Open <http://localhost:3000>; any protected page redirects to
+`/login`. Create the first account from that page ("No account yet? Create
+one"), or from the API:
+
+```bash
+curl -X POST http://127.0.0.1:8000/auth/register -H "Content-Type: application/json" -d "{\"email\":\"you@example.com\",\"password\":\"at-least-8-chars\"}"
+```
+
+The JWT is stored in an **httpOnly cookie** set by the Next.js server, so no
+token is ever readable from client JavaScript. Sign out from the sidebar.
+
+Set `AUTH_DISABLED=true` only for local development without a login.
+
 ### 5. Voice agent (optional)
 
 ```bash
@@ -198,6 +214,17 @@ py -3.11 -m venv .venv
 .venv/Scripts/python.exe agent.py dev
 ```
 
+**With `AUTH_DISABLED=false`, the voice agent needs its own token**, or its
+calls to `/query` are rejected with 401 like any other unauthenticated client.
+Mint one and put it in `agent/.env` as `GROUNDTRUTH_API_TOKEN`:
+
+```bash
+cd backend && .venv/Scripts/python.exe -c "from app.api.security import issue_token; print(issue_token('groundtruth-voice-agent'))"
+```
+
+Tokens expire after `JWT_EXPIRE_MINUTES` (default 60), so re-mint before a demo
+or raise that value for a long-running agent.
+
 ---
 
 ## Environment variables
@@ -205,14 +232,30 @@ py -3.11 -m venv .venv
 All of these live in `backend/.env`. Only `OPENAI_API_KEY` is required for full
 functionality; everything else degrades visibly rather than silently.
 
-### Required for real evaluation
+### LLM provider (generation + RAGAS judge)
 
-| Variable | Purpose | Where to get it |
+`LLM_PROVIDER` selects the provider: `openai` or `groq`. Groq speaks the OpenAI
+wire protocol, so both run through the same client and differ only by base URL,
+key and model name.
+
+| Provider | Variables | Where to get a key |
 |---|---|---|
-| `OPENAI_API_KEY` | RAG generation + RAGAS judge | <https://platform.openai.com/api-keys> |
+| `openai` | `OPENAI_API_KEY`, optional `OPENAI_BASE_URL`, `LLM_MODEL`, `EVAL_LLM_MODEL` | <https://platform.openai.com/api-keys> |
+| `groq` | `GROQ_API_KEY`, `GROQ_BASE_URL`, `GROQ_MODEL`, `GROQ_EVAL_MODEL` | <https://console.groq.com/keys> |
 
-Without it the pipeline still runs — retrieval, guardrails, context validation
-and latency all work — but generation and RAGAS scoring report as
+Verified working on Groq with `openai/gpt-oss-120b`: JSON structured output,
+`temperature=0`, and all three RAGAS metrics.
+
+**Groq serves no embedding models.** RAGAS answer-relevance therefore uses the
+local `EMBEDDING_MODEL` — the same model the corpus is indexed with — so no
+embedding API is needed for either provider.
+
+`LLM_MAX_RETRIES` (default 5) covers transient provider rate limits; the OpenAI
+SDK honours `Retry-After`. Groq's free tier caps tokens per minute *and* per
+day, so a long evaluation run can exhaust the daily budget.
+
+Without a usable key the pipeline still runs — retrieval, guardrails, context
+validation and latency all work — but generation and RAGAS scoring report as
 `unavailable` rather than producing invented numbers.
 
 ### Moss (primary retrieval)
@@ -252,6 +295,109 @@ not invented. Moss docs: <https://docs.usemoss.dev/>
 | `AUTH_DISABLED` | `true` | Must be `false` in production |
 | `RATE_LIMIT_PER_MINUTE` | `30` | |
 | `CORS_ORIGINS` | `http://localhost:3000` | Explicit allowlist |
+
+---
+
+## Deployment
+
+Three deployable units. The reference targets below are Render (backend, agent)
+and Vercel (frontend), but nothing is provider-specific.
+
+| Unit | What it is | Needs |
+|---|---|---|
+| `backend/` | FastAPI orchestrator | Python 3.11, **persistent disk**, PostgreSQL |
+| `frontend/` | Next.js dashboard | Node 20+, `BACKEND_API_URL` |
+| `agent/` | LiveKit voice worker | Python 3.11, a service JWT (optional unit) |
+
+### Database
+
+The schema is created on startup and is plain portable SQL - no SQLite-specific
+types or statements. It compiles cleanly for PostgreSQL (4 tables, 8 indexes).
+
+**Paste the host's `DATABASE_URL` as-is.** Managed providers issue shapes async
+SQLAlchemy cannot consume, and the application normalises them for you:
+
+| Supplied | Problem | Handled |
+|---|---|---|
+| `postgres://…` | no such SQLAlchemy dialect | rewritten to `postgresql+asyncpg://` |
+| `postgresql://…` | resolves to psycopg2 (sync, absent) | rewritten to `postgresql+asyncpg://` |
+| `…?sslmode=require` | asyncpg rejects `sslmode` | lifted into `connect_args={"ssl": True}` |
+
+SQLite remains the local default and is untouched by this.
+
+`create_all` does not alter existing tables. When a column is added the API logs
+which ones are missing at startup; in development, delete the database and let
+it be recreated. A long-lived deployment should add Alembic.
+
+### Persistent storage — required
+
+`backend/data/` is written at runtime. **Mount a persistent volume there**, or
+the corpus is lost on every redeploy:
+
+| Path | Contents | Must survive? |
+|---|---|---|
+| `data/faiss/groundtruth.index` | FAISS vectors | **Yes** - the retrievable corpus |
+| `data/faiss/groundtruth_meta.json` | chunk text + metadata | **Yes** - paired with the index |
+| `data/uploads/` | raw uploaded files | No - read once during ingestion, never again |
+| `data/groundtruth.db` | SQLite | Not in production (PostgreSQL replaces it) |
+
+Without a volume the app still starts, but every redeploy empties the corpus and
+retrieval returns nothing until documents are re-ingested. Moss indexes live in
+Moss's cloud and are unaffected.
+
+**First boot downloads models** (~90 MB MiniLM embeddings, plus spaCy/detoxify
+if the optional Guardrails validators are installed). Allow network egress and
+roughly 1 GB of disk, and expect a slower first start.
+
+### Backend on Render
+
+```
+Runtime          Python 3.11
+Root directory   backend
+Build command    pip install -r requirements.txt
+Start command    uvicorn app.main:app --host 0.0.0.0 --port $PORT
+Health check     /health
+Disk             mount at /opt/render/project/src/backend/data (1 GB)
+```
+
+`$PORT` is supplied by the platform - bind it rather than the `API_PORT`
+setting, which is only a local default.
+
+### Frontend on Vercel
+
+```
+Framework        Next.js (auto-detected)
+Root directory   frontend
+Build command    next build        (default)
+Environment      BACKEND_API_URL = https://<your-backend>.onrender.com
+```
+
+`BACKEND_API_URL` is **not** prefixed `NEXT_PUBLIC_`, so it stays server-side.
+The browser only ever talks to `/api/gt/*` and `/api/auth/*` on its own origin;
+it never receives a token or a backend URL.
+
+### Voice agent (optional)
+
+Deploy as a Render **background worker** (it is not an HTTP service):
+
+```
+Root directory   agent
+Build command    pip install -r requirements.txt
+Start command    python agent.py start
+```
+
+With `AUTH_DISABLED=false` the agent needs its own token - see the voice agent
+setup above.
+
+### Production checklist
+
+- `APP_ENV=production` - the API then **refuses to start** with auth disabled,
+  a default JWT secret, or wildcard CORS.
+- `AUTH_DISABLED=false`.
+- `JWT_SECRET_KEY` - freshly generated, not the template value.
+- `CORS_ORIGINS` - the deployed frontend origin only, never `*`.
+- `JWT_EXPIRE_MINUTES` - lower it if you raised it for a demo.
+- Cookies are already `Secure` when `NODE_ENV=production` (Vercel sets this).
 
 ---
 
@@ -327,16 +473,36 @@ Two layers:
    API key, no network. Input: weapons, malware, self-harm, prompt injection,
    credential requests. Output: leaked API keys, PII, overconfident claims.
    Matched secrets are redacted in the trace, never echoed.
-2. **Guardrails AI hub validators** — used when installed. They are an optional
-   install, so the engine reports which are actually active and never claims a
-   check ran when it did not:
+2. **Guardrails AI validators** — used when installed. The engine reports which
+   are actually active and never claims a check ran when it did not.
+
+Install with **pip, not the `guardrails hub` CLI** — that CLI and its private
+registry are deprecated; validators now ship on public PyPI:
 
 ```bash
-guardrails hub install hub://guardrails/toxic_language
-guardrails hub install hub://guardrails/detect_pii
+pip install guardrails-ai-detect-pii guardrails-ai-toxic-language
+python -c "import nltk; nltk.download('punkt_tab')"
 ```
 
-A validator that errors produces a `REVIEW`, never a silent pass.
+The `punkt_tab` download is required: without it `ToxicLanguage` raises on every
+call. On first use `DetectPII` also downloads a spaCy model and `ToxicLanguage` a
+detoxify checkpoint; both are cached afterwards.
+
+`DetectPII` is deliberately scoped to entities that genuinely constitute a
+disclosure (email, phone, card, SSN, passport, IBAN, IP). Its default preset
+includes `DATE_TIME`, which flags "Refunds are available within 7 days" as PII —
+a validator that fires on nearly every answer tells an operator nothing.
+
+A validator that errors produces a `REVIEW` the first time — never a silent pass
+— and is then quarantined for the life of the process, so a permanently broken
+check cannot push every answer to `NEEDS_REVIEW`.
+
+**Known log noise:** Guardrails AI registers an anonymous telemetry exporter at
+import time. On a network that cannot resolve its endpoint, its background thread
+logs `ConnectionError` tracebacks. Validation results are unaffected. Neither
+`settings.disable_tracing` nor `settings.rc.enable_metrics` suppresses it (both
+measured); the only effective opt-out is machine-level:
+`guardrails configure --disable-metrics`.
 
 ---
 

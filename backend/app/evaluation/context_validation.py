@@ -144,8 +144,8 @@ def _heuristic_reason(
         return base + "At least one chunk is a strong semantic match for the query."
     return base + (
         "Retrieved chunks are only loosely related to the query, so they may not "
-        "contain the specific detail asked for. Configure OPENAI_API_KEY for a "
-        "stronger sufficiency check."
+        "contain the specific detail asked for. Configure an LLM provider key "
+        "for a stronger sufficiency check."
     )
 
 

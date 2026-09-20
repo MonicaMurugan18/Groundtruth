@@ -13,6 +13,7 @@ import {
   Timer,
 } from 'lucide-react';
 import { Card, CardBody, CardHeader } from '@/components/ui/Card';
+import { MossPanel } from '@/components/MossPanel';
 import { ScoreBar } from '@/components/ui/ScoreBar';
 import {
   BackendBadge,
@@ -44,6 +45,7 @@ export function TrustReport({ result }: { result: EvaluationResponse }) {
         </div>
         <div className="space-y-4 lg:col-span-2">
           <ScorePanel result={result} />
+          <MossPanel result={result} />
           <GuardrailPanel result={result} />
           <FactualPanel result={result} />
           <LatencyPanel latency={result.latency} />

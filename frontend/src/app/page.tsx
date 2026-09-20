@@ -1,243 +1,138 @@
-'use client';
-
+import { cookies } from 'next/headers';
 import Link from 'next/link';
-import { useEffect, useState } from 'react';
-import {
-  Activity,
-  CheckCircle2,
-  FlaskConical,
-  Mic,
-  ShieldAlert,
-  Timer,
-  TriangleAlert,
-  XCircle,
-} from 'lucide-react';
-import { PageHeader } from '@/components/AppShell';
-import { Card, CardBody, CardHeader, EmptyState, StatTile } from '@/components/ui/Card';
-import {
-  ChannelBadge,
-  GuardrailBadge,
-  ReliabilityBadge,
-} from '@/components/ui/StatusBadge';
-import { api } from '@/lib/api';
-import type { DashboardStats } from '@/lib/types';
+import { ArrowRight } from 'lucide-react';
 
-/** Percentage formatter that distinguishes "no data" from zero. */
-function percent(value: number | null): string {
-  return value === null ? '—' : `${(value * 100).toFixed(0)}%`;
-}
+import { ArchitectureSection, WhySection } from '@/components/landing/ArchitectureSection';
+import { ClosingSection, LandingFooter } from '@/components/landing/ClosingSection';
+import { DemoSection, ReliabilityStates } from '@/components/landing/DemoSection';
+import { HeroPipeline } from '@/components/landing/HeroPipeline';
+import { LandingNav } from '@/components/landing/LandingNav';
+import { ProblemSection } from '@/components/landing/ProblemSection';
+import { SolutionSection } from '@/components/landing/SolutionSection';
 
-function millis(value: number | null): string {
-  if (value === null) return '—';
-  return value >= 1000 ? `${(value / 1000).toFixed(2)} s` : `${value.toFixed(0)} ms`;
-}
+/**
+ * Public landing page.
+ *
+ * Reachable without a session (see `PUBLIC_PATHS` in src/proxy.ts). The
+ * authenticated dashboard lives at /dashboard and is unchanged.
+ *
+ * Nothing on this page calls the evaluation API. Every figure shown is a fixed
+ * illustration and is labelled as an example, because a product whose entire
+ * claim is "we do not present unverified output as a result" should not break
+ * that rule in its own marketing.
+ *
+ * The only session-dependent detail is the navbar's primary button. Its state
+ * is resolved here from the cookie's presence - the same presence check
+ * src/proxy.ts makes, used only to pick a label - so the browser never has to
+ * probe an authenticated endpoint that would 401 for every visitor.
+ */
 
-export default function DashboardPage() {
-  const [stats, setStats] = useState<DashboardStats | null>(null);
-  const [error, setError] = useState<string | null>(null);
+const SESSION_COOKIE = 'gt_session';
 
-  useEffect(() => {
-    api
-      .stats(8)
-      .then(setStats)
-      .catch((err: Error) => setError(err.message));
-  }, []);
+export const metadata = {
+  title: 'Groundtruth — Trust Every AI Decision',
+  description:
+    'Groundtruth verifies what your AI agents say before you trust what they do. Retrieve evidence, detect unsupported claims, apply runtime guardrails, measure reliability and trace every decision.',
+};
 
-  if (error) {
-    return (
-      <>
-        <PageHeader
-          title="Dashboard"
-          description="Aggregate reliability of the agent across every evaluated interaction."
-        />
-        <Card>
-          <EmptyState
-            icon={XCircle}
-            title="Could not load statistics"
-            description={error}
-          />
-        </Card>
-      </>
-    );
-  }
-
-  if (!stats) {
-    return (
-      <>
-        <PageHeader
-          title="Dashboard"
-          description="Aggregate reliability of the agent across every evaluated interaction."
-        />
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          {Array.from({ length: 8 }).map((_, index) => (
-            <div
-              key={index}
-              className="h-24 animate-pulse rounded-xl border border-border bg-surface"
-            />
-          ))}
-        </div>
-      </>
-    );
-  }
-
-  const evaluated = stats.total_evaluations;
-  const reliableRate =
-    evaluated > 0 ? `${((stats.reliable_count / evaluated) * 100).toFixed(0)}% of all` : undefined;
+export default async function LandingPage() {
+  const signedIn = Boolean((await cookies()).get(SESSION_COOKIE)?.value);
 
   return (
-    <>
-      <PageHeader
-        title="Dashboard"
-        description="Aggregate reliability of the agent across every evaluated interaction."
-        action={
-          <Link
-            href="/evaluate"
-            className="flex items-center gap-1.5 rounded-lg bg-accent px-3.5 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90"
-          >
-            <FlaskConical size={15} />
-            New evaluation
-          </Link>
-        }
-      />
+    <div className="min-h-screen overflow-x-hidden bg-background">
+      <LandingNav signedIn={signedIn} />
 
-      {evaluated === 0 ? (
-        <Card>
-          <EmptyState
-            icon={Activity}
-            title="No evaluations yet"
-            description="Ingest a document and run a query. Every interaction is scored for faithfulness, relevance, retrieval quality, safety and latency, then recorded here."
-            action={
-              <Link
-                href="/evaluate"
-                className="inline-flex items-center gap-1.5 rounded-lg bg-accent px-3.5 py-2 text-sm font-medium text-white"
-              >
-                <FlaskConical size={15} />
-                Run the first evaluation
-              </Link>
-            }
-          />
-        </Card>
-      ) : (
-        <>
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <StatTile
-              label="Total evaluations"
-              value={String(evaluated)}
-              sublabel={
-                stats.voice_evaluations > 0
-                  ? `${stats.voice_evaluations} via voice`
-                  : undefined
-              }
-              icon={Activity}
-            />
-            <StatTile
-              label="Reliable"
-              value={String(stats.reliable_count)}
-              sublabel={reliableRate}
-              tone="reliable"
-              icon={CheckCircle2}
-            />
-            <StatTile
-              label="Needs review"
-              value={String(stats.needs_review_count)}
-              tone="review"
-              icon={TriangleAlert}
-            />
-            <StatTile
-              label="Failed"
-              value={String(stats.failed_count)}
-              tone="failed"
-              icon={XCircle}
-            />
+      {/* ---------------------------------------------------------------- */}
+      {/* Hero                                                              */}
+      {/* ---------------------------------------------------------------- */}
+      <section className="relative">
+        <div className="gt-grid pointer-events-none absolute inset-0" aria-hidden />
 
-            <StatTile
-              label="Avg faithfulness"
-              value={percent(stats.avg_faithfulness)}
-              sublabel="Support by retrieved context"
-              icon={CheckCircle2}
-            />
-            <StatTile
-              label="Avg relevance"
-              value={percent(stats.avg_relevance)}
-              sublabel="Answer addresses the question"
-              icon={Activity}
-            />
-            <StatTile
-              label="Guardrail violations"
-              value={String(stats.guardrail_violations)}
-              tone={stats.guardrail_violations > 0 ? 'review' : 'neutral'}
-              sublabel="Blocked or flagged"
-              icon={ShieldAlert}
-            />
-            <StatTile
-              label="Avg latency"
-              value={millis(stats.avg_latency_ms)}
-              sublabel="End to end"
-              icon={Timer}
-            />
-          </div>
-
-          <div className="mt-5">
-            <Card>
-              <CardHeader
-                title="Recent evaluations"
-                icon={Activity}
-                action={
-                  <Link
-                    href="/history"
-                    className="text-xs font-medium text-accent hover:underline"
-                  >
-                    View all
-                  </Link>
+        <div className="relative mx-auto grid max-w-6xl items-center gap-12 px-4 pt-14 pb-20 sm:px-6 lg:grid-cols-2 lg:gap-10 lg:pt-20 lg:pb-28">
+          <div>
+            <div
+              className="gt-rise inline-flex items-center gap-2 rounded-full border border-border bg-surface/70 px-3 py-1"
+              style={{ animationDelay: '60ms' }}
+            >
+              <span
+                className="gt-pulse h-1.5 w-1.5 rounded-full"
+                style={
+                  {
+                    background: 'var(--info)',
+                    '--gt-pulse-color': 'rgba(88,166,255,.45)',
+                  } as React.CSSProperties
                 }
               />
-              <CardBody className="px-0 py-0">
-                <ul className="divide-y divide-border">
-                  {stats.recent.map((trace) => (
-                    <li key={trace.evaluation_id}>
-                      <Link
-                        href={`/history/${trace.evaluation_id}`}
-                        className="flex items-center justify-between gap-4 px-5 py-3 transition-colors hover:bg-surface-raised"
-                      >
-                        <div className="flex min-w-0 items-center gap-2.5">
-                          <ReliabilityBadge status={trace.status} size="sm" />
-                          <span className="truncate text-sm text-foreground">
-                            {trace.query}
-                          </span>
-                          {trace.channel === 'voice' && (
-                            <ChannelBadge channel={trace.channel} />
-                          )}
-                        </div>
-                        <div className="flex shrink-0 items-center gap-3 font-mono text-xs text-faint">
-                          <span title="Faithfulness">
-                            {trace.faithfulness === null
-                              ? '—'
-                              : `${(trace.faithfulness * 100).toFixed(0)}%`}
-                          </span>
-                          <span title="Total latency">
-                            {trace.total_ms === null
-                              ? '—'
-                              : `${trace.total_ms.toFixed(0)}ms`}
-                          </span>
-                          <GuardrailBadge status={trace.guardrail_status} size="sm" />
-                        </div>
-                      </Link>
-                    </li>
-                  ))}
-                </ul>
-              </CardBody>
-            </Card>
-          </div>
-        </>
-      )}
+              <span className="text-[11px] font-medium tracking-[0.16em] text-muted uppercase">
+                AI Agent Reliability Platform
+              </span>
+            </div>
 
-      {stats.voice_evaluations === 0 && evaluated > 0 && (
-        <p className="mt-4 flex items-center gap-1.5 text-xs text-faint">
-          <Mic size={12} />
-          No voice interactions recorded yet. Voice turns appear here alongside
-          typed ones once the LiveKit agent is running.
-        </p>
-      )}
-    </>
+            <h1
+              className="gt-rise mt-6 text-4xl leading-[1.08] font-semibold text-balance text-foreground sm:text-5xl lg:text-6xl"
+              style={{ animationDelay: '140ms' }}
+            >
+              Trust Every
+              <br />
+              AI Decision.
+            </h1>
+
+            <p
+              className="gt-rise mt-5 max-w-lg text-base leading-relaxed text-pretty text-muted sm:text-lg"
+              style={{ animationDelay: '220ms' }}
+            >
+              Groundtruth verifies what your AI agents say before you trust what
+              they do.
+            </p>
+
+            <p
+              className="gt-rise mt-4 max-w-lg text-sm leading-relaxed text-pretty text-faint"
+              style={{ animationDelay: '290ms' }}
+            >
+              Retrieve evidence. Detect unsupported claims. Apply runtime
+              guardrails. Measure reliability. Trace every decision.
+            </p>
+
+            <div
+              className="gt-rise mt-8 flex flex-col gap-3 sm:flex-row"
+              style={{ animationDelay: '360ms' }}
+            >
+              <Link
+                href="/login"
+                className="group inline-flex items-center justify-center gap-2 rounded-lg bg-accent px-5 py-2.5 text-sm font-medium text-white transition-opacity hover:opacity-90"
+              >
+                Start Evaluating
+                <ArrowRight
+                  size={15}
+                  className="transition-transform duration-300 group-hover:translate-x-0.5"
+                />
+              </Link>
+              <a
+                href="#how-it-works"
+                className="inline-flex items-center justify-center rounded-lg border border-border bg-surface px-5 py-2.5 text-sm font-medium text-foreground transition-colors hover:border-border-strong"
+              >
+                See How It Works
+              </a>
+            </div>
+          </div>
+
+          <div
+            className="gt-fade flex justify-center lg:justify-end"
+            style={{ animationDelay: '420ms' }}
+          >
+            <HeroPipeline />
+          </div>
+        </div>
+      </section>
+
+      <ProblemSection />
+      <SolutionSection />
+      <DemoSection />
+      <ReliabilityStates />
+      <ArchitectureSection />
+      <WhySection />
+      <ClosingSection />
+      <LandingFooter />
+    </div>
   );
 }

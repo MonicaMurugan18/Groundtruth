@@ -29,7 +29,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 from app.config.settings import Settings, get_settings
@@ -59,6 +61,63 @@ class MossSearchResult:
     hits: list[MossHit]
     # Moss's own measurement of the search, distinct from our wall-clock span.
     time_taken_ms: float | None
+    # Echoed back by the SDK's SearchResult so the trace records what Moss
+    # actually received and which index answered, rather than what we assumed.
+    index_name: str | None = None
+    model_id: str | None = None
+    echoed_query: str | None = None
+
+
+class MossStage(str, Enum):
+    """Which pipeline step issued a Moss call."""
+
+    PRIMARY_RETRIEVAL = "primary_retrieval"
+    EVIDENCE_VERIFICATION = "evidence_verification"
+
+
+class MossStatus(str, Enum):
+    """Outcome of a single Moss call, recorded verbatim on the trace."""
+
+    SUCCESS = "success"
+    EMPTY = "empty"          # Moss answered, but matched nothing
+    FAILED = "failed"        # Moss was called and errored
+    NOT_CONFIGURED = "not_configured"
+    SKIPPED = "skipped"      # deliberately not called
+
+
+@dataclass(slots=True)
+class MossStageRecord:
+    """An auditable record of one Moss call.
+
+    Every field is either measured or returned by Moss. Nothing here is
+    inferred: when a call fails, ``engine_ms`` stays None rather than being
+    filled with our wall-clock time, and ``error`` carries Moss's own message.
+    """
+
+    stage: MossStage
+    status: MossStatus
+    query: str | None = None
+    index: str | None = None
+    result_count: int = 0
+    engine_ms: float | None = None   # Moss self-reported
+    wall_ms: float | None = None     # our measurement, including transport
+    top_score: float | None = None
+    model_id: str | None = None
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "stage": self.stage.value,
+            "status": self.status.value,
+            "query": self.query,
+            "index": self.index,
+            "result_count": self.result_count,
+            "engine_ms": self.engine_ms,
+            "wall_ms": self.wall_ms,
+            "top_score": self.top_score,
+            "model_id": self.model_id,
+            "error": self.error,
+        }
 
 
 class MossRetriever:
@@ -69,6 +128,25 @@ class MossRetriever:
         self._client: Any | None = None
         self._loaded_indexes: set[str] = set()
         self._lock = asyncio.Lock()
+        # Circuit breaker. A failing Moss call is not cheap: the SDK retries
+        # internally, so an outage costs ~2.5s per attempt, and the pipeline
+        # makes two Moss calls per evaluation. Once Moss has failed we stop
+        # calling it for a short window - that keeps a quota outage from both
+        # burning more quota and adding seconds to every request. The remembered
+        # error is still reported, so the trace stays truthful about why.
+        self._failed_until: float = 0.0
+        self._last_error: str | None = None
+
+    def _circuit_open(self) -> bool:
+        return time.monotonic() < self._failed_until
+
+    def _trip_circuit(self, error: str) -> None:
+        self._failed_until = time.monotonic() + self._settings.moss_failure_cooldown_s
+        self._last_error = error
+
+    def _reset_circuit(self) -> None:
+        self._failed_until = 0.0
+        self._last_error = None
 
     # -- Status ----------------------------------------------------------
 
@@ -230,7 +308,83 @@ class MossRetriever:
         except (TypeError, ValueError):
             time_taken = None
 
-        return MossSearchResult(hits=hits, time_taken_ms=time_taken)
+        return MossSearchResult(
+            hits=hits,
+            time_taken_ms=time_taken,
+            # SearchResult echoes these back; recording Moss's own values keeps
+            # the trace honest about which index actually answered.
+            index_name=getattr(result, "index_name", None),
+            model_id=getattr(result, "model_id", None),
+            echoed_query=getattr(result, "query", None),
+        )
+
+    # -- Instrumented calls used by the pipeline --------------------------
+
+    async def search_recorded(
+        self,
+        query: str,
+        *,
+        stage: MossStage,
+        top_k: int | None = None,
+    ) -> tuple[MossSearchResult | None, MossStageRecord]:
+        """Run a search and return it alongside an auditable stage record.
+
+        Never raises. Callers get a record describing exactly what happened, so
+        a Moss outage becomes a visible, attributable trace entry instead of an
+        exception that has to be re-interpreted further up the stack.
+        """
+        record = MossStageRecord(
+            stage=stage,
+            status=MossStatus.SKIPPED,
+            query=query,
+            index=self.index_name,
+        )
+
+        if not self.configured:
+            record.status = MossStatus.NOT_CONFIGURED
+            record.error = (
+                "MOSS_PROJECT_ID / MOSS_PROJECT_KEY are not set."
+            )
+            return None, record
+
+        if self._circuit_open():
+            # Reported as a failure, not a silent skip: Moss genuinely is not
+            # serving, and the trace should say so with the original reason.
+            record.status = MossStatus.FAILED
+            record.error = (
+                f"Skipped: Moss failed recently and is in a "
+                f"{self._settings.moss_failure_cooldown_s:.0f}s cooldown to avoid "
+                f"burning quota. Last error: {self._last_error}"
+            )
+            return None, record
+
+        started = time.perf_counter()
+        try:
+            result = await self.search(query, top_k=top_k)
+        except (MossNotConfigured, MossUnavailable) as exc:
+            record.wall_ms = round((time.perf_counter() - started) * 1000, 2)
+            record.status = (
+                MossStatus.NOT_CONFIGURED
+                if isinstance(exc, MossNotConfigured)
+                else MossStatus.FAILED
+            )
+            # Moss's own message, preserved verbatim for the trace and the UI.
+            record.error = str(exc)
+            if record.status is MossStatus.FAILED:
+                self._trip_circuit(record.error)
+            # engine_ms deliberately stays None: Moss reported no timing.
+            return None, record
+
+        record.wall_ms = round((time.perf_counter() - started) * 1000, 2)
+        record.engine_ms = result.time_taken_ms
+        record.result_count = len(result.hits)
+        record.index = result.index_name or self.index_name
+        record.model_id = result.model_id
+        scores = [hit.score for hit in result.hits if hit.score is not None]
+        record.top_score = max(scores) if scores else None
+        record.status = MossStatus.SUCCESS if result.hits else MossStatus.EMPTY
+        self._reset_circuit()  # Moss answered; clear any previous outage state
+        return result, record
 
 
 _retriever: MossRetriever | None = None

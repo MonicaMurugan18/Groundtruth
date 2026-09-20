@@ -44,19 +44,72 @@ def _normalise_sqlite_path(url: str) -> str:
     return f"{prefix}{resolved.as_posix()}"
 
 
+def _normalise_postgres_url(url: str) -> tuple[str, dict]:
+    """Accept the DATABASE_URL shapes managed hosts actually hand out.
+
+    Render, Heroku, Supabase and Neon issue URLs this application cannot use
+    unchanged, and both failures happen at startup:
+
+    * ``postgres://``   -> SQLAlchemy 2 has no such dialect (NoSuchModuleError)
+    * ``postgresql://`` -> resolves to psycopg2, which is sync and not installed
+    * ``?sslmode=require`` -> asyncpg rejects it (``connect() got an unexpected
+      keyword argument 'sslmode'``); asyncpg spells it ``ssl``.
+
+    Rather than make every operator hand-edit the URL, normalise it here and
+    return any connect args the translation implies. SQLite is untouched.
+    """
+    connect_args: dict = {}
+    if url.startswith("sqlite"):
+        return url, connect_args
+
+    # Scheme: force the async driver.
+    if url.startswith("postgres://"):
+        url = "postgresql+asyncpg://" + url[len("postgres://") :]
+    elif url.startswith("postgresql://"):
+        url = "postgresql+asyncpg://" + url[len("postgresql://") :]
+
+    # Query string: translate sslmode -> asyncpg's ssl connect arg.
+    if "sslmode=" in url:
+        from urllib.parse import urlencode, urlsplit, urlunsplit
+
+        parts = urlsplit(url)
+        params = [
+            (key, value)
+            for key, value in (
+                pair.split("=", 1) if "=" in pair else (pair, "")
+                for pair in parts.query.split("&")
+                if pair
+            )
+        ]
+        sslmode = next((v for k, v in params if k == "sslmode"), None)
+        remaining = [(k, v) for k, v in params if k != "sslmode"]
+        url = urlunsplit(parts._replace(query=urlencode(remaining)))
+        # disable/allow mean "no TLS"; everything else means "use TLS".
+        if sslmode and sslmode not in {"disable", "allow"}:
+            connect_args["ssl"] = True
+
+    return url, connect_args
+
+
 def get_engine() -> AsyncEngine:
     """Return the process-wide async engine, creating it on first use."""
     global _engine
     if _engine is None:
         settings = get_settings()
         url = _normalise_sqlite_path(settings.database_url)
+        url, connect_args = _normalise_postgres_url(url)
         _engine = create_async_engine(
             url,
             echo=False,
             pool_pre_ping=True,
             future=True,
+            connect_args=connect_args,
         )
-        logger.info("Database engine created (%s)", url.split("://", 1)[0])
+        logger.info(
+            "Database engine created (%s%s)",
+            url.split("://", 1)[0],
+            ", TLS" if connect_args.get("ssl") else "",
+        )
     return _engine
 
 

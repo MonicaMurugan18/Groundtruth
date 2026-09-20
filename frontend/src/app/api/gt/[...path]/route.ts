@@ -12,6 +12,8 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 
+import { SESSION_COOKIE } from '@/app/api/auth/[action]/route';
+
 const BACKEND_URL = process.env.BACKEND_API_URL ?? 'http://127.0.0.1:8000';
 const API_TOKEN = process.env.GROUNDTRUTH_API_TOKEN ?? '';
 
@@ -36,8 +38,14 @@ async function proxy(request: NextRequest, path: string[]): Promise<Response> {
       headers.set(key, value);
     }
   });
-  if (API_TOKEN) {
-    headers.set('Authorization', `Bearer ${API_TOKEN}`);
+
+  // Prefer the signed-in user's session token, read from the httpOnly cookie
+  // that only this server-side handler can see. GROUNDTRUTH_API_TOKEN remains
+  // as a service-to-service fallback for non-browser callers.
+  const sessionToken = request.cookies.get(SESSION_COOKIE)?.value;
+  const bearer = sessionToken || API_TOKEN;
+  if (bearer) {
+    headers.set('Authorization', `Bearer ${bearer}`);
   }
 
   const method = request.method;

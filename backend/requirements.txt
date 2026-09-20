@@ -6,6 +6,8 @@
 fastapi==0.120.4
 uvicorn[standard]==0.41.0
 pydantic==2.12.4
+# EmailStr validation for the login/registration payloads.
+email-validator==2.3.0
 pydantic-settings==2.15.0
 python-dotenv==1.2.1
 python-multipart==0.0.20
@@ -45,6 +47,19 @@ openai
 # Floor litellm at the oldest release with prebuilt wheels, so a failed
 # resolution can never fall back to building 1.93.0 from source.
 litellm>=1.96.2
+
+# --- Optional Guardrails AI validators ---
+# The engine runs fine without these: it reports which validators are actually
+# active and never claims a check ran when it did not. Install them for the
+# extra coverage (ToxicLanguage, DetectPII).
+#
+# Install with pip, NOT `guardrails hub install` - that CLI and its private
+# registry are deprecated; validators now ship on public PyPI.
+#
+# ToxicLanguage additionally needs the NLTK punkt_tab corpus, or it raises on
+# every call:  python -c "import nltk; nltk.download('punkt_tab')"
+guardrails-ai-detect-pii==0.0.6
+guardrails-ai-toxic-language==0.0.2
 
 # --- Integrations ---
 moss>=1.4

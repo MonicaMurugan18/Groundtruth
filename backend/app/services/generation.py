@@ -18,10 +18,17 @@ from app.tracing.timer import LLM, LatencyTrace
 
 logger = logging.getLogger(__name__)
 
-NO_LLM_MESSAGE = (
-    "No answer was generated because no LLM is configured. Set OPENAI_API_KEY in "
-    "backend/.env to enable answer generation."
-)
+
+def _no_llm_message() -> str:
+    """Explain the missing configuration in terms of the active provider."""
+    from app.config.settings import get_settings
+
+    settings = get_settings()
+    return (
+        "No answer was generated because no LLM is configured. Set "
+        f"{settings.llm_key_variable} in backend/.env (LLM_PROVIDER="
+        f"{settings.active_provider}) to enable answer generation."
+    )
 
 
 @dataclass(slots=True)
@@ -71,7 +78,7 @@ async def generate_answer(
     except LLMNotConfigured as exc:
         logger.info("Generation skipped: %s", exc)
         return GenerationResult(
-            answer=NO_LLM_MESSAGE,
+            answer=_no_llm_message(),
             answer_found=False,
             available=False,
             error=str(exc),

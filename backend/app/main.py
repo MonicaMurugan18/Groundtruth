@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
-from app.api.routes import evaluation, health, ingest, traces, voice
+from app.api.routes import auth, evaluation, health, ingest, traces, voice
 from app.api.security import assert_production_security, limiter
 from app.config.settings import get_settings
 from app.db.session import close_db, init_db
@@ -50,8 +50,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     if not settings.llm_configured:
         logger.warning(
-            "OPENAI_API_KEY is not set. Answer generation and RAGAS scoring will be "
-            "reported as unavailable; Groundtruth will not substitute placeholder scores."
+            "%s is not set for LLM_PROVIDER=%s. Answer generation and RAGAS scoring "
+            "will be reported as unavailable; Groundtruth will not substitute "
+            "placeholder scores.",
+            settings.llm_key_variable,
+            settings.active_provider,
+        )
+    else:
+        logger.info(
+            "LLM provider: %s (generation: %s, judge: %s)",
+            settings.active_provider,
+            settings.active_llm_model,
+            settings.active_eval_model,
         )
     if not settings.moss_configured:
         logger.warning(
@@ -113,6 +123,7 @@ def create_app() -> FastAPI:
 
     # --- Routes ---
     app.include_router(health.router)
+    app.include_router(auth.router)
     app.include_router(ingest.router)
     app.include_router(evaluation.router)
     app.include_router(traces.router)

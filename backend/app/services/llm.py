@@ -7,9 +7,15 @@ Two separate clients are exposed on purpose:
   re-run of the same triad yields the same verdict; a judge that drifts between
   runs cannot be used as a reliability gate.
 
-If ``OPENAI_API_KEY`` is absent every call raises :class:`LLMNotConfigured`. The
-pipeline catches that and marks the affected stage UNAVAILABLE rather than
-emitting a placeholder score.
+Provider selection is driven by ``LLM_PROVIDER`` (``openai`` or ``groq``). Groq
+speaks the OpenAI wire protocol, so both run through the same ``AsyncOpenAI``
+client and differ only by base URL, key and model name. Call sites read the
+resolved ``Settings.llm_*`` / ``Settings.active_*`` accessors rather than
+branching on the provider themselves.
+
+If the active provider's key is absent every call raises
+:class:`LLMNotConfigured`. The pipeline catches that and marks the affected
+stage UNAVAILABLE rather than emitting a placeholder score.
 """
 
 from __future__ import annotations
@@ -43,13 +49,18 @@ class LLMReply:
 def _client_kwargs(settings: Settings) -> dict[str, Any]:
     if not settings.llm_configured:
         raise LLMNotConfigured(
-            "OPENAI_API_KEY is not set. Add it to backend/.env to enable answer "
+            f"{settings.llm_key_variable} is not set, but LLM_PROVIDER is "
+            f"{settings.active_provider!r}. Add it to backend/.env to enable answer "
             "generation and RAGAS evaluation."
         )
-    kwargs: dict[str, Any] = {"api_key": settings.openai_api_key}
-    # Optional override for any OpenAI-compatible gateway.
-    if settings.openai_base_url.strip():
-        kwargs["base_url"] = settings.openai_base_url.strip()
+    kwargs: dict[str, Any] = {
+        "api_key": settings.llm_api_key,
+        "max_retries": settings.llm_max_retries,
+    }
+    # Base URL override. Groq supplies its OpenAI-compatible endpoint here;
+    # OpenAI uses its default unless OPENAI_BASE_URL points at a gateway.
+    if settings.llm_base_url:
+        kwargs["base_url"] = settings.llm_base_url
     return kwargs
 
 
@@ -77,7 +88,7 @@ async def complete(
     """Send a chat completion request."""
     settings = get_settings()
     client = get_async_openai_client()
-    chosen_model = model or settings.llm_model
+    chosen_model = model or settings.active_llm_model
 
     request: dict[str, Any] = {
         "model": chosen_model,
@@ -178,17 +189,19 @@ def get_judge_llm() -> Any:
     settings = get_settings()
     if not settings.llm_configured:
         raise LLMNotConfigured(
-            "OPENAI_API_KEY is not set, so RAGAS scoring cannot run. Groundtruth "
-            "reports these metrics as unavailable rather than estimating them."
+            f"{settings.llm_key_variable} is not set, so RAGAS scoring cannot run. "
+            "Groundtruth reports these metrics as unavailable rather than "
+            "estimating them."
         )
 
     kwargs: dict[str, Any] = {
-        "model": settings.eval_llm_model,
-        "api_key": settings.openai_api_key,
+        "model": settings.active_eval_model,
+        "api_key": settings.llm_api_key,
         "temperature": 0.0,
     }
-    if settings.openai_base_url.strip():
-        kwargs["base_url"] = settings.openai_base_url.strip()
+    # Groq is reached through the same OpenAI-compatible client, by base URL.
+    if settings.llm_base_url:
+        kwargs["base_url"] = settings.llm_base_url
     return ChatOpenAI(**kwargs)
 
 

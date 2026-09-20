@@ -33,11 +33,22 @@ from app.schemas.evaluation import (
     GuardrailResult,
     LatencyBreakdown,
     MetricScore,
+    MossEvidence,
+    MossStageInfo,
     RetrievedChunk,
     TraceSummary,
 )
 
+
 logger = logging.getLogger(__name__)
+
+
+def _primary_moss_status(response: EvaluationResponse) -> str:
+    """Status of the primary-retrieval Moss call, or 'skipped' if there was none."""
+    for stage in response.moss_stages:
+        if stage.stage == "primary_retrieval":
+            return stage.status
+    return "skipped"
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +73,11 @@ async def save(
         reference_answer=reference_answer,
         channel=response.channel.value,
         retrieval_backend=response.retrieval_backend.value,
+        moss_status=_primary_moss_status(response),
+        moss_stages=[stage.model_dump() for stage in response.moss_stages],
+        moss_evidence=(
+            response.moss_evidence.model_dump() if response.moss_evidence else {}
+        ),
         faithfulness_score=response.faithfulness.value,
         faithfulness_status=response.faithfulness.status.value,
         relevance_score=response.answer_relevance.value,
@@ -306,6 +322,8 @@ def to_response(row: EvaluationTrace) -> EvaluationResponse:
         explanation=row.explanation,
         supported=row.supported,
         retrieval_backend=RetrievalBackend(row.retrieval_backend),
+        moss_stages=[MossStageInfo(**s) for s in (row.moss_stages or [])],
+        moss_evidence=(MossEvidence(**row.moss_evidence) if row.moss_evidence else None),
         latency=LatencyBreakdown(**(row.latency_detail or {"total_ms": row.total_ms or 0.0})),
         warnings=list(row.warnings or []),
     )

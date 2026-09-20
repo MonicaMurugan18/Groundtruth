@@ -8,6 +8,7 @@ import {
   FlaskConical,
   History,
   LayoutDashboard,
+  LogOut,
   Mic,
   ShieldCheck,
 } from 'lucide-react';
@@ -15,7 +16,7 @@ import { api } from '@/lib/api';
 import type { CapabilitiesResponse } from '@/lib/types';
 
 const NAV = [
-  { href: '/', label: 'Dashboard', icon: LayoutDashboard },
+  { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/evaluate', label: 'Evaluate', icon: FlaskConical },
   { href: '/history', label: 'History', icon: History },
   { href: '/voice', label: 'Voice', icon: Mic },
@@ -30,12 +31,28 @@ const NAV = [
  */
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  // The landing and login pages are standalone - no sidebar, no integration
+  // strip. Everything else gets the application chrome.
+  const isStandalone = pathname === '/login' || pathname === '/';
   const [capabilities, setCapabilities] = useState<CapabilitiesResponse | null>(
     null,
   );
   const [offline, setOffline] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
+
+  async function signOut() {
+    setSigningOut(true);
+    // Clearing the httpOnly cookie is the whole logout: tokens are stateless,
+    // so once the browser stops sending it, every request is unauthenticated.
+    await fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
+    window.location.href = '/login';
+  }
 
   useEffect(() => {
+    // Hooks run before the standalone early-return below, so without this the
+    // public landing page would fire an authenticated capabilities request it
+    // has no use for (and which 401s for a signed-out visitor).
+    if (isStandalone) return;
     let cancelled = false;
     api
       .capabilities()
@@ -44,7 +61,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [isStandalone]);
+
+  if (isStandalone) return <>{children}</>;
 
   return (
     <div className="flex min-h-screen flex-col lg:flex-row">
@@ -61,8 +80,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
         <nav className="flex gap-1 overflow-x-auto px-3 pb-3 lg:flex-col lg:overflow-visible">
           {NAV.map(({ href, label, icon: Icon }) => {
-            const active =
-              href === '/' ? pathname === '/' : pathname.startsWith(href);
+            const active = pathname.startsWith(href);
             return (
               <Link
                 key={href}
@@ -81,7 +99,18 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           })}
         </nav>
 
-        <div className="mt-auto hidden border-t border-border px-4 py-4 lg:block">
+        <div className="mt-auto hidden border-t border-border px-3 py-3 lg:block">
+          <button
+            onClick={signOut}
+            disabled={signingOut}
+            className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm text-muted transition-colors hover:bg-surface-raised hover:text-foreground disabled:opacity-50"
+          >
+            <LogOut size={16} />
+            {signingOut ? 'Signing out…' : 'Sign out'}
+          </button>
+        </div>
+
+        <div className="hidden border-t border-border px-4 py-4 lg:block">
           <p className="mb-2.5 flex items-center gap-1.5 text-[11px] font-medium tracking-wide text-faint uppercase">
             <Activity size={11} />
             Integrations

@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import pytest
 
+from app.schemas.common import GuardrailStatus
+
 from app.guardrails.policies import (
     INPUT_POLICIES,
     OUTPUT_POLICIES,
@@ -111,3 +113,73 @@ def test_blocking_findings_are_ordered_first():
     findings = run_policies(answer, OUTPUT_POLICIES)
     assert len(findings) >= 2
     assert findings[0].severity is Severity.BLOCK
+
+
+# --- Broken hub validator must not poison every request ----------------------
+
+
+async def test_a_raising_hub_validator_is_reported_once_then_quarantined():
+    """A permanently broken validator must not flag every answer.
+
+    Observed for real: ToxicLanguage raised on every call before its NLTK
+    punkt_tab corpus was present, pushing every answer to NEEDS_REVIEW and
+    destroying the guardrail signal. The first failure must still surface (a
+    silent pass would hide that the check never ran), but it must not repeat.
+    """
+    from app.guardrails.engine import GuardrailEngine, _LoadedValidator
+    from app.guardrails.policies import Severity
+
+    class Exploding:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def validate(self, *args, **kwargs):
+            self.calls += 1
+            raise RuntimeError("missing corpus")
+
+    engine = GuardrailEngine()
+    broken = Exploding()
+    # Pre-seed the loader so no real hub import is attempted.
+    engine._hub_validators = [
+        _LoadedValidator(name="Exploding", validator=broken, severity=Severity.BLOCK)
+    ]
+
+    first = await engine.check_output("Refunds are available within 7 days.")
+    assert first.status is GuardrailStatus.REVIEW
+    assert any("Exploding" in name for name in first.triggered)
+
+    second = await engine.check_output("Refunds are available within 7 days.")
+    assert second.status is GuardrailStatus.PASS, "must not flag every subsequent answer"
+    assert "Exploding" not in engine.active_validators()
+
+
+async def test_empty_text_is_not_flagged_by_hub_validators():
+    """An empty answer cannot contain PII or toxicity.
+
+    DetectPII returns validation_passed=False for an empty string, which flagged
+    every blocked or failed response (those have no answer text) as a PII
+    disclosure. Hub validators must be skipped on empty input, matching what
+    run_policies already does.
+    """
+    from app.guardrails.engine import GuardrailEngine, _LoadedValidator
+    from app.guardrails.policies import Severity
+
+    class AlwaysFails:
+        def validate(self, *args, **kwargs):
+            class R:
+                validation_passed = False
+            return R()
+
+    engine = GuardrailEngine()
+    engine._hub_validators = [
+        _LoadedValidator(name="AlwaysFails", validator=AlwaysFails(), severity=Severity.REVIEW)
+    ]
+
+    for empty in ("", "   ", "\n"):
+        result = await engine.check_output(empty)
+        assert result.status is GuardrailStatus.PASS, f"{empty!r} must not be flagged"
+        assert result.triggered == []
+
+    # Non-empty text still reaches the hub validators.
+    non_empty = await engine.check_output("Refunds are available within 7 days.")
+    assert non_empty.status is GuardrailStatus.REVIEW

@@ -34,6 +34,7 @@ from app.evaluation.context_validation import validate_context
 from app.evaluation.factuality import verify_against_reference
 from app.evaluation.reliability import decide
 from app.guardrails.engine import get_guardrail_engine
+from app.retrieval.evidence import verify_with_moss
 from app.retrieval.retriever import retrieve
 from app.schemas.common import (
     ContextValidationStatus,
@@ -49,6 +50,7 @@ from app.schemas.evaluation import (
     FactualVerification,
     LatencyBreakdown,
     MetricScore,
+    MossStageInfo,
     RetrievedChunk,
 )
 from app.services import trace_store
@@ -56,6 +58,7 @@ from app.services.generation import generate_answer
 from app.tracing.timer import (
     CONTEXT_VALIDATION,
     EVALUATION,
+    MOSS_EVIDENCE,
     LatencyTrace,
 )
 
@@ -124,6 +127,20 @@ async def run_pipeline(
     output_guard = await guard.check_output(answer, trace=trace)
     guardrail = _merge_guardrails(input_guard, output_guard)
 
+    # --- 5b. Moss evidence verification ------------------------------------
+    # Second Moss stage: ask the corpus whether anything backs the *answer*,
+    # which is a different question from what retrieval asked of the *query*.
+    # Advisory only - it is not merged into the faithfulness context.
+    moss_stages: list = []
+    if retrieval.moss_record is not None:
+        moss_stages.append(retrieval.moss_record)
+
+    with trace.span(MOSS_EVIDENCE):
+        moss_evidence, evidence_record = await verify_with_moss(answer, settings=settings)
+    moss_stages.append(evidence_record)
+    if evidence_record.engine_ms is not None:
+        trace.record_ms("moss_evidence_engine", evidence_record.engine_ms)
+
     # --- 6. Evaluation -----------------------------------------------------
     with trace.span(EVALUATION):
         if generation.available and answer.strip() and context_texts:
@@ -178,6 +195,8 @@ async def run_pipeline(
         explanation=verdict.explanation,
         supported=verdict.supported,
         retrieval_backend=retrieval.backend,
+        moss_stages=[MossStageInfo(**r.to_dict()) for r in moss_stages],
+        moss_evidence=moss_evidence,
         latency=LatencyBreakdown(**trace.to_dict()),
         warnings=_dedupe(warnings),
     )
@@ -228,6 +247,14 @@ async def evaluate_supplied_triad(
     with trace.span(CONTEXT_VALIDATION):
         context_validation = await validate_context(query, contexts, similarities)
 
+    # Moss evidence verification applies here too: the context was supplied by
+    # the caller, but the question "does the corpus back this answer?" is still
+    # meaningful and is what this stage asks.
+    with trace.span(MOSS_EVIDENCE):
+        moss_evidence, evidence_record = await verify_with_moss(answer, settings=settings)
+    if evidence_record.engine_ms is not None:
+        trace.record_ms("moss_evidence_engine", evidence_record.engine_ms)
+
     with trace.span(EVALUATION):
         scores = await ragas_eval.evaluate_triad(
             query=query, contexts=contexts, answer=answer
@@ -270,6 +297,8 @@ async def evaluate_supplied_triad(
         explanation=verdict.explanation,
         supported=verdict.supported,
         retrieval_backend=RetrievalBackend.NONE,
+        moss_stages=[MossStageInfo(**evidence_record.to_dict())],
+        moss_evidence=moss_evidence,
         latency=LatencyBreakdown(**trace.to_dict()),
         warnings=_dedupe(verdict.warnings),
     )
