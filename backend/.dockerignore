@@ -1,0 +1,33 @@
+# Keep secrets out of the image. `COPY . .` would otherwise bake backend/.env
+# into a layer, where it stays readable to anyone who can pull the image even
+# if a later layer deletes it. Configuration reaches the container through
+# Render's environment variables instead.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# The local virtualenv is multi-GB and Linux-incompatible; dependencies are
+# installed from requirements.txt inside the build.
+.venv/
+venv/
+
+# Python noise
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local runtime data. The FAISS index and uploads belong on the mounted disk,
+# not in the image; app start-up creates these directories if missing.
+data/
+*.db
+*.sqlite3
+
+# Not needed to run the service
+tests/
+.git/
+.gitignore
