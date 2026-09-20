@@ -16,8 +16,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-
 from app.config.settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -77,6 +75,15 @@ def extract_text(path: Path) -> str:
 
 def chunk_text(text: str, source: str, *, doc_id: str | None = None) -> list[Chunk]:
     """Split ``text`` into overlapping chunks with stable, content-derived ids."""
+    # Imported here, not at module scope, because langchain_text_splitters
+    # eagerly imports its sentence_transformers submodule, which pulls in
+    # torch and transformers - measured at 34.5s of the 48s it took to import
+    # app.main. Uvicorn imports the app before it opens the listening socket,
+    # so that cost was paid before the port existed and the platform's port
+    # scan timed out. Deferring it to the first chunking call keeps splitting
+    # behaviour identical. Same pattern as pypdf in extract_text above.
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+
     settings = get_settings()
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=settings.chunk_size,

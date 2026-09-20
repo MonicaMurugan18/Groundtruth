@@ -70,16 +70,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
 
     # Warm the expensive lazy components in the background so the first user
-    # request is not charged ~23s of model loading and imports.
-    warmup_task = asyncio.create_task(warm_up())
+    # request is not charged ~23s of model loading and imports. This never
+    # blocks the listening socket - uvicorn opens it after lifespan start-up,
+    # and warm_up hands off to a worker thread immediately - but it can be
+    # turned off where the spare CPU is not there to spend.
+    warmup_task: asyncio.Task | None = None
+    if settings.warmup_on_startup:
+        warmup_task = asyncio.create_task(warm_up())
+    else:
+        logger.info(
+            "Warm-up disabled (WARMUP_ON_STARTUP=false); models load lazily on "
+            "the first request that needs them."
+        )
 
     logger.info("Groundtruth orchestrator ready (env=%s)", settings.app_env)
     try:
         yield
     finally:
-        warmup_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await warmup_task
+        if warmup_task is not None:
+            warmup_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await warmup_task
         await close_db()
 
 

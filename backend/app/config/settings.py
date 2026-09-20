@@ -106,6 +106,13 @@ class Settings(BaseSettings):
     # deterministic policies always run, and DetectPII is untouched.
     disable_toxic_language: bool = False
 
+    # Warm the expensive lazy components (embedding model, FAISS index,
+    # guardrail validators) in a background thread at start-up. It never blocks
+    # the listening socket, but on a small instance the CPU it burns can slow
+    # the first health checks. Set false to leave every component lazy, so the
+    # cost lands on the first request that actually needs it instead.
+    warmup_on_startup: bool = True
+
     # --- Reliability thresholds ---
     faithfulness_threshold: float = 0.70
     relevance_threshold: float = 0.70
