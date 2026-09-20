@@ -22,16 +22,33 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Dependencies first, so edits to application code reuse this cached layer.
-COPY requirements.txt ./
-RUN pip install --upgrade pip && pip install -r requirements.txt
+# PyTorch, CPU build, installed BEFORE the requirements so that the
+# transitive torch dependency is already satisfied when pip resolves them.
+#
+# The default PyPI torch wheel is CUDA-enabled: it drags in nvidia-cudnn,
+# nvidia-cublas and the rest of the CUDA runtime, well over 2 GB of libraries
+# that cannot be used on a CPU-only instance and that push the container past
+# a 512 MB memory cap. The CPU index serves the same torch API, so
+# sentence-transformers, transformers and detoxify all work unchanged.
+RUN pip install --upgrade pip \
+    && pip install torch --index-url https://download.pytorch.org/whl/cpu
 
-# spaCy's en_core_web_lg (~400 MB). It belongs to DetectPII, via
-# presidio-analyzer's default NLP engine — NOT to ToxicLanguage. Presidio
-# fetches it lazily on first AnalyzerEngine() construction, which start-up
-# triggers through warm-up. Installing it here is what makes that start-up
-# download impossible, and it keeps DetectPII fully active.
-RUN python -m spacy download en_core_web_lg
+# Dependencies second, so edits to application code reuse this cached layer.
+COPY requirements.txt ./
+RUN pip install -r requirements.txt
+
+# NOTE: en_core_web_lg (~400 MB) is deliberately NOT installed.
+#
+# It belongs to DetectPII, through presidio-analyzer's default NLP engine.
+# Loading it alongside torch does not fit in 512 MB. The guardrail engine
+# checks for the model before constructing DetectPII and skips the validator
+# when it is absent, so presidio never reaches its `spacy.cli.download`
+# fallback and the container has no run-time download to blow up on.
+#
+# Every other guardrail is unaffected: the deterministic policy layer always
+# runs, and ToxicLanguage is governed by DISABLE_TOXIC_LANGUAGE. To enable PII
+# detection on an instance with the memory for it, add:
+#     RUN python -m spacy download en_core_web_lg
 
 # NLTK sentence tokeniser, needed by ToxicLanguage whenever it is enabled
 # (DISABLE_TOXIC_LANGUAGE=false). Without it the validator raises on every

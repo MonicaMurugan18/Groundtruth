@@ -280,3 +280,70 @@ def test_disable_flag_overrides_every_environment():
     assert base.model_copy(
         update={"app_env": "staging", "disable_toxic_language": False}
     ).toxic_language_enabled
+
+
+# --- DetectPII must never trigger a run-time model download -----------------
+
+
+def test_detect_pii_is_skipped_when_its_spacy_model_is_absent(
+    monkeypatch, import_spy
+):
+    """Presidio downloads en_core_web_lg (~400MB) if it is missing.
+
+    `_download_spacy_model_if_needed` runs on the first AnalyzerEngine()
+    construction, which on a memory-capped container is fatal. The engine must
+    check first and skip, not discover this by being OOM-killed.
+    """
+    from app.guardrails import engine as engine_module
+
+    monkeypatch.setattr(engine_module, "_spacy_model_installed", lambda *a: False)
+    engine, pinned = _engine_with("production", False)
+    monkeypatch.setattr(
+        "app.guardrails.engine.get_settings", lambda: pinned, raising=True
+    )
+
+    names = [entry.name for entry in engine._load_hub_validators()]
+
+    assert "DetectPII" not in names
+    # The proof: never imported, so AnalyzerEngine() was never constructed and
+    # no download could have been triggered.
+    assert "DetectPII" not in import_spy
+    # The always-on policy layer is untouched.
+    assert "weapons_or_explosives" in engine.active_validators()
+
+
+def test_detect_pii_is_attempted_when_its_model_is_present(monkeypatch, import_spy):
+    """Control: with the model installed, DetectPII still loads normally."""
+    from app.guardrails import engine as engine_module
+
+    monkeypatch.setattr(engine_module, "_spacy_model_installed", lambda *a: True)
+    engine, pinned = _engine_with("production", True)
+    monkeypatch.setattr(
+        "app.guardrails.engine.get_settings", lambda: pinned, raising=True
+    )
+
+    engine._load_hub_validators()
+
+    assert "DetectPII" in import_spy
+
+
+def test_spacy_model_check_does_not_import_spacy():
+    """The check runs on every start-up, so it must stay free."""
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys;"
+            "from app.guardrails.engine import _spacy_model_installed as f;"
+            "f();"
+            "print('SPACY' if 'spacy' in sys.modules else 'CLEAN')",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert "CLEAN" in result.stdout

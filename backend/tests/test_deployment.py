@@ -48,19 +48,34 @@ def test_start_command_binds_all_interfaces_on_the_platform_port(dockerfile: str
     assert not line.lstrip().startswith("["), "exec-form CMD will not expand $PORT"
 
 
-def test_spacy_model_is_baked_in_so_startup_never_downloads_it(dockerfile: str):
-    """The 400 MB model must be fetched at build time, not on a cold start.
+def test_torch_is_installed_from_the_cpu_index(dockerfile: str):
+    """CUDA torch pulls >2 GB of NVIDIA runtime that cannot fit in 512 MB.
 
-    en_core_web_lg belongs to DetectPII (presidio-analyzer's default NLP
-    engine), not to ToxicLanguage. Presidio downloads it lazily when
-    AnalyzerEngine() is first constructed, which warm-up triggers during
-    start-up - the stall this image exists to prevent.
+    It must also be installed before requirements.txt, or pip resolves the
+    transitive torch dependency from PyPI and gets the CUDA build anyway.
     """
-    assert re.search(r"spacy download en_core_web_lg", dockerfile)
+    assert "download.pytorch.org/whl/cpu" in dockerfile
 
-    build_step = dockerfile.index("spacy download en_core_web_lg")
-    app_copy = dockerfile.index("COPY . .")
-    assert build_step < app_copy, "model must be installed during the build"
+    torch_step = dockerfile.index("download.pytorch.org/whl/cpu")
+    requirements_step = dockerfile.index("pip install -r requirements.txt")
+    assert torch_step < requirements_step, (
+        "CPU torch must be installed before requirements.txt, otherwise pip "
+        "satisfies torch from PyPI with the CUDA build"
+    )
+
+
+def test_spacy_model_is_not_installed(dockerfile: str):
+    """en_core_web_lg (~400 MB) does not fit alongside torch in 512 MB.
+
+    The guardrail engine skips DetectPII when the model is absent, so nothing
+    reaches presidio's spacy.cli.download fallback at run time.
+    """
+    active = [
+        line
+        for line in dockerfile.splitlines()
+        if "spacy download" in line and not line.lstrip().startswith("#")
+    ]
+    assert not active, f"en_core_web_lg must not be installed: {active}"
 
 
 def test_nltk_tokeniser_is_present_for_toxic_language(dockerfile: str):

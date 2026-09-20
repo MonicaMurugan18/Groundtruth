@@ -19,6 +19,7 @@ is checked before the answer is returned.
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import logging
 from dataclasses import dataclass
 
@@ -72,6 +73,27 @@ _HUB_VALIDATORS: tuple[tuple[str, str, Severity, dict], ...] = (
         },
     ),
 )
+
+
+# DetectPII runs on presidio-analyzer, whose default NLP engine is spaCy's
+# en_core_web_lg (~400MB). Presidio does not fail when that model is absent -
+# `_download_spacy_model_if_needed` fetches it via `spacy.cli.download` on the
+# first AnalyzerEngine() construction. On a memory-capped container that
+# download is what kills the process, so its presence is checked up front and
+# the validator is skipped rather than allowed to pull it at run time.
+_DETECT_PII_SPACY_MODEL = "en_core_web_lg"
+
+
+def _spacy_model_installed(name: str = _DETECT_PII_SPACY_MODEL) -> bool:
+    """Whether the spaCy model is already installed, without importing spaCy.
+
+    spaCy models ship as ordinary Python distributions, so a spec lookup
+    answers this in microseconds and never triggers a download.
+    """
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):  # pragma: no cover - defensive
+        return False
 
 
 @dataclass(slots=True)
@@ -128,6 +150,16 @@ class GuardrailEngine:
                     "skipping its model download.",
                     settings.app_env,
                     settings.disable_toxic_language,
+                )
+                continue
+            if class_name == "DetectPII" and not _spacy_model_installed():
+                logger.warning(
+                    "Guardrails hub validator DetectPII needs the spaCy model "
+                    "%s, which is not installed. Skipping it rather than "
+                    "letting presidio download ~400MB at run time. Install it "
+                    "to enable PII detection: python -m spacy download %s",
+                    _DETECT_PII_SPACY_MODEL,
+                    _DETECT_PII_SPACY_MODEL,
                 )
                 continue
             try:
