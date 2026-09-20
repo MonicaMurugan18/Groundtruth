@@ -22,6 +22,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
+from app.config.settings import get_settings
 from app.guardrails.policies import (
     INPUT_POLICIES,
     OUTPUT_POLICIES,
@@ -47,6 +48,11 @@ logger = logging.getLogger(__name__)
 # within 7 days" as PII (DATE_TIME, score 0.85). A validator that fires on
 # essentially every answer tells an operator nothing, so this narrows it to
 # entities that genuinely constitute a privacy disclosure in an agent response.
+#
+# ToxicLanguage builds a Detoxify model when constructed, downloading several
+# hundred MB of weights on a cold cache. That is paid at start-up (warm-up
+# calls active_validators), so it is skippable via settings - see
+# `toxic_language_enabled` and the guard in _load_hub_validators below.
 _HUB_VALIDATORS: tuple[tuple[str, str, Severity, dict], ...] = (
     ("guardrails.hub", "ToxicLanguage", Severity.BLOCK, {}),
     (
@@ -106,8 +112,24 @@ class GuardrailEngine:
         # It is cosmetic — validation results are unaffected — so it is left to
         # the operator rather than worked around in code.
 
+        settings = get_settings()
+
         loaded: list[_LoadedValidator] = []
         for module_path, class_name, severity, kwargs in _HUB_VALIDATORS:
+            # Checked before the import, not just before construction: the
+            # point is that a disabled validator must not pull its model at
+            # all. A skipped validator is simply absent from
+            # `active_validators`, so the capabilities view keeps telling the
+            # truth about which checks actually ran.
+            if class_name == "ToxicLanguage" and not settings.toxic_language_enabled:
+                logger.info(
+                    "Guardrails hub validator ToxicLanguage is disabled by "
+                    "configuration (APP_ENV=%s, DISABLE_TOXIC_LANGUAGE=%s); "
+                    "skipping its model download.",
+                    settings.app_env,
+                    settings.disable_toxic_language,
+                )
+                continue
             try:
                 module = __import__(module_path, fromlist=[class_name])
                 validator_cls = getattr(module, class_name)

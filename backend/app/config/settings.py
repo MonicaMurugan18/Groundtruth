@@ -97,6 +97,15 @@ class Settings(BaseSettings):
     # evaluation, so an outage would otherwise add ~5s to every request.
     moss_failure_cooldown_s: float = 60.0
 
+    # --- Guardrails ---
+    # Guardrails AI's ToxicLanguage validator constructs a Detoxify model on
+    # first load, which downloads several hundred MB of PyTorch weights. On a
+    # container with a cold cache that download dominates start-up, so it is
+    # opt-out: set DISABLE_TOXIC_LANGUAGE=true. Development disables it by
+    # default for the same reason. Every other guardrail is unaffected - the
+    # deterministic policies always run, and DetectPII is untouched.
+    disable_toxic_language: bool = False
+
     # --- Reliability thresholds ---
     faithfulness_threshold: float = 0.70
     relevance_threshold: float = 0.70
@@ -202,6 +211,19 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.app_env.lower() in {"production", "prod"}
+
+    @property
+    def toxic_language_enabled(self) -> bool:
+        """Whether the ToxicLanguage validator should be loaded at all.
+
+        The explicit flag wins everywhere. Otherwise the validator is skipped
+        in development, where paying a multi-hundred-MB model download on every
+        cold start buys nothing. Staging and production keep it enabled unless
+        the flag is set.
+        """
+        if self.disable_toxic_language:
+            return False
+        return self.app_env.lower() not in {"development", "dev"}
 
     def _resolve(self, value: str) -> Path:
         """Resolve a possibly-relative configured path against ``backend/``."""

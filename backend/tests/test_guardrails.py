@@ -183,3 +183,100 @@ async def test_empty_text_is_not_flagged_by_hub_validators():
     # Non-empty text still reaches the hub validators.
     non_empty = await engine.check_output("Refunds are available within 7 days.")
     assert non_empty.status is GuardrailStatus.REVIEW
+
+
+# --- ToxicLanguage can be disabled without paying for its model -------------
+#
+# ToxicLanguage constructs a Detoxify model on load, downloading several
+# hundred MB of weights. Start-up calls active_validators(), so on a cold
+# container that download blocks the deploy. These tests prove the validator is
+# skipped *before* its import - if the skip happened later, the import would
+# already have triggered the download.
+#
+# No network is touched here: the import hook below refuses both hub
+# validators, which the engine handles as "not installed".
+
+
+def _engine_with(app_env: str, disable_toxic_language: bool):
+    """A fresh engine whose settings are pinned to the values under test."""
+    from app.config.settings import get_settings as _real_get_settings
+    from app.guardrails import engine as engine_module
+
+    pinned = _real_get_settings().model_copy(
+        update={
+            "app_env": app_env,
+            "disable_toxic_language": disable_toxic_language,
+        }
+    )
+    return engine_module.GuardrailEngine(), pinned
+
+
+@pytest.fixture
+def import_spy(monkeypatch):
+    """Record hub-validator imports and refuse them, so no model downloads."""
+    import builtins
+
+    attempted: list[str] = []
+    real_import = builtins.__import__
+
+    def _spy(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "guardrails.hub":
+            attempted.extend(fromlist or ())
+            raise ImportError("blocked by test: hub validators must not load")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", _spy)
+    return attempted
+
+
+@pytest.mark.parametrize(
+    "app_env,disable_flag",
+    [
+        ("production", True),   # explicit opt-out, the Railway setting
+        ("development", False),  # development skips it by default
+        ("development", True),
+    ],
+)
+def test_toxic_language_is_skipped_before_import(
+    monkeypatch, import_spy, app_env: str, disable_flag: bool
+):
+    engine, pinned = _engine_with(app_env, disable_flag)
+    monkeypatch.setattr(
+        "app.guardrails.engine.get_settings", lambda: pinned, raising=True
+    )
+
+    names = [entry.name for entry in engine._load_hub_validators()]
+
+    assert "ToxicLanguage" not in names
+    # The real proof: the import was never attempted, so no model was fetched.
+    assert "ToxicLanguage" not in import_spy
+    # Every other guardrail is untouched - DetectPII is still attempted, and
+    # the deterministic policies still report as active.
+    assert "DetectPII" in import_spy
+    assert "weapons_or_explosives" in engine.active_validators()
+
+
+def test_toxic_language_is_attempted_when_enabled(monkeypatch, import_spy):
+    """Control: without the flag, production still tries to load it."""
+    engine, pinned = _engine_with("production", False)
+    monkeypatch.setattr(
+        "app.guardrails.engine.get_settings", lambda: pinned, raising=True
+    )
+
+    engine._load_hub_validators()
+
+    assert "ToxicLanguage" in import_spy
+
+
+def test_disable_flag_overrides_every_environment():
+    from app.config.settings import get_settings as _real_get_settings
+
+    base = _real_get_settings()
+    for app_env in ("production", "prod", "staging", "development"):
+        assert not base.model_copy(
+            update={"app_env": app_env, "disable_toxic_language": True}
+        ).toxic_language_enabled
+    # ...and only development disables it implicitly.
+    assert base.model_copy(
+        update={"app_env": "staging", "disable_toxic_language": False}
+    ).toxic_language_enabled
